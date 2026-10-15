@@ -1,0 +1,16 @@
+; PARTIAL / VERBATIM keys — Duo Authentication Proxy on T5-DuoProxy (192.168.40.10)
+; C:\Program Files\Duo Security Authentication Proxy\conf\authproxy.cfg
+; Only the [radius_server_auto] client lines below were captured in project notes.
+; [ad_client] (LDAP to AD 192.168.50.2) and ikey/skey/api_host are intentionally omitted.
+
+[radius_server_auto]
+; ... ikey / skey / api_host / client=ad_client  (REDACTED / not captured)
+radius_ip_1=192.168.30.1       ; Palo Alto (GlobalProtect RADIUS source: interconnect IP)
+radius_secret_1=<REDACTED>
+radius_ip_2=192.168.20.6       ; Guacamole ZTNA gateway
+radius_secret_2=<REDACTED>     ; must equal RADIUS_SHARED_SECRET in the Guacamole container
+; Restart: net stop DuoAuthProxy && net start DuoAuthProxy
+;
+; Direction gotcha: radius_ip_N is an INBOUND allowlist (who may ask the proxy).
+; The PA RADIUS Server Profile IP is the OUTBOUND destination and must be 192.168.40.10.
+; Setting the PA profile to 192.168.30.1 (its own interface) is why Duo pushes never arrived.

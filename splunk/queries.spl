@@ -1,0 +1,38 @@
+# ============================================================
+# Team 5 — SPL reference. Provenance noted per query.
+# ============================================================
+
+# ---- Dashboard panels (VERBATIM, deployed in team5_siem_overview_dashboard.xml) ----
+index=firewall | stats count
+index=wineventlog | stats count
+index=securityonion | stats count
+index=firewall OR index=wineventlog OR index=securityonion | timechart count by index
+index=firewall | timechart count by sourcetype
+index=wineventlog | stats count by host | sort - count
+index=firewall ("auth-fail" OR "Authentication failed" OR "Invalid User" OR "deny" OR "drop") | timechart count
+index=wineventlog | top limit=10 EventCode
+
+# ---- Ingestion validation searches (VERBATIM, run before screenshots) ----
+index=firewall | timechart count by sourcetype      # expect pan:firewall AND fortinet
+index=wineventlog | stats count by host             # expect T5-WebServer1 AND T5-WebServer2
+index=wineventlog | top EventCode                   # blank => install Splunk_TA_windows
+index=securityonion | head 20                       # Zeek records via Linux UF (_json)
+
+# ---- SOAR trigger: scan detection (VERBATIM as designed; live alert NOT confirmed fired) ----
+# Raw PA syslog has no extracted fields (no PA TA), so src_ip is pulled positionally.
+# Validate the rex output in Search before saving as an alert.
+index=firewall sourcetype=pan:firewall deny
+| rex field=_raw ",(?<src_ip>\d+\.\d+\.\d+\.\d+),\d+\.\d+\.\d+\.\d+,"
+| stats count by src_ip
+| where count > 10
+
+# Alert settings (as designed):
+#   Title:   IDS - DMZ Scan Detected
+#   Schedule: Real-time, or cron "* * * * *" over a 5-min window
+#   Trigger: Once   | Throttle: 5 minutes
+#   Action:  Webhook -> http://192.168.20.6:5678/webhook/splunk-alert   (production path, not /webhook-test/)
+
+# ---- Known limitation (documented honestly) ----
+# The "Auth Failures / Denies" panel is keyword-matching on raw text; routine PA deny
+# actions dominate it. It measures "events containing those words", not true auth
+# failures. Fix = install the Palo Alto Networks Add-on to get action/user/src_ip fields.

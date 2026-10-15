@@ -1,0 +1,263 @@
+{
+  "name": "Team 5 SOAR - Splunk to Palo Alto Auto-Block (P11)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "splunk-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Webhook - Splunk Alert",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "splunk-alert-hook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- Stage 2: Extract source IP from the Splunk alert payload ---\nconst inp = $input.first().json;\nconst payload = inp.body || inp;            // n8n puts POST body under .body\nconst result = payload.result || {};        // Splunk sends the first result here\n\n// Try common Splunk field names, then fall back to a regex on _raw\nlet ip = result.src_ip || result.src || result.clientip || result.source_ip || payload.src_ip;\nif (!ip && result._raw) {\n  const m = String(result._raw).match(/\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/);\n  if (m) ip = m[0];\n}\nif (!ip) { throw new Error('No source IP found in Splunk alert payload'); }\n\nreturn [{ json: { src_ip: ip, search_name: payload.search_name || 'unknown' } }];"
+      },
+      "id": "node-extract",
+      "name": "Extract IP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://ip-api.com/json/{{ $('Extract IP').item.json.src_ip }}",
+        "options": {}
+      },
+      "id": "node-geoip",
+      "name": "GeoIP Lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.abuseipdb.com/api/v2/check",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "ipAddress",
+              "value": "={{ $('Extract IP').item.json.src_ip }}"
+            },
+            {
+              "name": "maxAgeInDays",
+              "value": "90"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Key",
+              "value": "PASTE_YOUR_ABUSEIPDB_KEY"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-abuse",
+      "name": "AbuseIPDB Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- Stage 4: Decide whether to block ---\nconst ip    = $('Extract IP').item.json.src_ip;\nconst geo   = $('GeoIP Lookup').item.json || {};\nconst abuse = ($('AbuseIPDB Check').item.json.data) || {};\nconst score = (abuse.abuseConfidenceScore !== undefined) ? abuse.abuseConfidenceScore : -1;\n\n// Allowlist = OUR OWN infrastructure. These must NEVER be blocked.\n// NOTE: this is an EXPLICIT infra list, not a blanket RFC1918 block,\n// because your P12 attacker box may itself be RFC1918 and must stay blockable.\n// >>> EDIT this list to match your environment before the demo <<<\nconst allowlist = [\n  '10.1.47.5',      // PA mgmt\n  '192.168.30.1',   // PA interconnect\n  '192.168.30.2',   // FortiGate\n  '192.168.50.2',   // AD\n  '192.168.50.3',   // Security Onion\n  '192.168.50.4',   // Splunk\n  '192.168.40.10',  // Duo Proxy\n  '192.168.20.4',   // Web1\n  '192.168.20.5',   // Web2\n  '192.168.20.6',   // Guacamole / n8n host\n  '192.168.20.7'    // HAProxy\n  // add your admin jump host / school public range here if desired\n];\nconst isAllowlisted = allowlist.includes(ip);\n\n// The Splunk/IDS detection already fired (that is WHY this workflow ran),\n// so we block any source that is not our own infrastructure.\n// AbuseIPDB score is recorded as enrichment/context for the report.\nconst shouldBlock = !isAllowlisted;\n\nreturn [{ json: {\n  src_ip: ip,\n  shouldBlock: shouldBlock,\n  isAllowlisted: isAllowlisted,\n  abuseScore: score,\n  country: geo.country || 'unknown',\n  isp: geo.isp || 'unknown',\n  search_name: $('Extract IP').item.json.search_name,\n  reason: isAllowlisted\n    ? 'Allowlisted infrastructure - no action'\n    : ('Detection fired; source not allowlisted (AbuseIPDB ' + score + ') - blocking')\n}}];"
+      },
+      "id": "node-decide",
+      "name": "Decide",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-block",
+              "leftValue": "={{ $json.shouldBlock }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if",
+      "name": "Malicious?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://192.168.20.1/api/",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "type",
+              "value": "user-id"
+            },
+            {
+              "name": "cmd",
+              "value": "=<uid-message><version>2.0</version><type>update</type><payload><register><entry ip=\"{{ $json.src_ip }}\"><tag><member>n8n-block</member></tag></entry></register></payload></uid-message>"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-PAN-KEY",
+              "value": "PASTE_YOUR_PA_API_KEY"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "node-block",
+      "name": "Block on Palo Alto",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "node-skip",
+      "name": "Skipped (Allowlisted)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - Splunk Alert": {
+      "main": [
+        [
+          {
+            "node": "Extract IP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract IP": {
+      "main": [
+        [
+          {
+            "node": "GeoIP Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GeoIP Lookup": {
+      "main": [
+        [
+          {
+            "node": "AbuseIPDB Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AbuseIPDB Check": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "Malicious?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Malicious?": {
+      "main": [
+        [
+          {
+            "node": "Block on Palo Alto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skipped (Allowlisted)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}
